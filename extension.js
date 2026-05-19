@@ -117,7 +117,7 @@ function activate(context) {
                         nodesCache.set(filePath, {
                             id: fileName,
                             label: fileName,
-                            code: content,
+                            rawImports: extractImports(content),
                             filePath: filePath
                         });
                         return;
@@ -141,7 +141,7 @@ function activate(context) {
         const edges = [];
         for (const [filePath, node] of nodesCache.entries()) {
             const currentDir = path.dirname(filePath);
-            const importedPaths = extractImports(node.code);
+            const importedPaths = node.rawImports || [];
             for (const importPath of importedPaths) {
                 const resolved = resolveImportPath(currentDir, importPath);
                 if (resolved && nodesCache.has(resolved)) {
@@ -158,7 +158,9 @@ function activate(context) {
         }
 
         const nodes = Array.from(nodesCache.values()).map(node => ({
-            ...node,
+            id: node.id,
+            label: node.label,
+            filePath: node.filePath,
             imports: nodeImports.get(node.id) || [],
             importedBy: nodeImportedBy.get(node.id) || []
         }));
@@ -218,7 +220,7 @@ function activate(context) {
                             nodesCache.set(file.fsPath, {
                                 id: fileName,
                                 label: fileName,
-                                code: content,
+                                rawImports: extractImports(content),
                                 filePath: file.fsPath
                             });
                         }
@@ -250,7 +252,7 @@ function activate(context) {
         const edges = [];
         for (const [filePath, node] of nodesCache.entries()) {
             const currentDir = path.dirname(filePath);
-            const importedPaths = extractImports(node.code);
+            const importedPaths = node.rawImports || [];
             for (const importPath of importedPaths) {
                 const resolved = resolveImportPath(currentDir, importPath);
                 if (resolved && nodesCache.has(resolved)) {
@@ -267,7 +269,9 @@ function activate(context) {
         }
 
         const nodes = Array.from(nodesCache.values()).map(node => ({
-            ...node,
+            id: node.id,
+            label: node.label,
+            filePath: node.filePath,
             imports: nodeImports.get(node.id) || [],
             importedBy: nodeImportedBy.get(node.id) || []
         }));
@@ -292,6 +296,23 @@ function activate(context) {
         switch (message.command) {
             case 'ready': {
                 scanProjectWorkspace();
+                break;
+            }
+            case 'getFileCode': {
+                try {
+                    const content = await fs.promises.readFile(message.filePath, 'utf8');
+                    visualPanel.webview.postMessage({
+                        command: 'fileCodeResponse',
+                        filePath: message.filePath,
+                        code: content
+                    });
+                } catch (error) {
+                    visualPanel.webview.postMessage({
+                        command: 'fileCodeResponse',
+                        filePath: message.filePath,
+                        code: 'Failed to read file: ' + error.message
+                    });
+                }
                 break;
             }
             case 'openFile': {
@@ -450,6 +471,30 @@ function getWebviewContent() {
             function ComponentNode({ data }) {
                 const [prompt, setPrompt] = useState('');
                 const { getNode, setCenter } = useReactFlow();
+                const [code, setCode] = useState(data.code || 'Click to load preview...');
+                const [loading, setLoading] = useState(false);
+
+                useEffect(() => {
+                    if (data.code) {
+                        setCode(data.code);
+                        setLoading(false);
+                    } else {
+                        setCode('Click to load preview...');
+                    }
+                }, [data.code]);
+
+                const loadCode = (e) => {
+                    e.stopPropagation();
+                    if (loading || (data.code && data.code !== 'Click to load preview...')) return;
+                    setLoading(true);
+                    setCode('Loading...');
+                    if (vscode) {
+                        vscode.postMessage({
+                            command: 'getFileCode',
+                            filePath: data.filePath
+                        });
+                    }
+                };
 
                 const focusNode = (id) => {
                     const node = getNode(id);
@@ -463,7 +508,7 @@ function getWebviewContent() {
                     if (vscode) vscode.postMessage({
                         command: 'requestAIEdit',
                         nodeId: data.label,
-                        currentCode: data.code,
+                        currentCode: code,
                         filePath: data.filePath,
                         prompt: prompt
                     });
@@ -497,13 +542,13 @@ function getWebviewContent() {
 
                 let borderClass = 'border-slate-800 hover:border-emerald-500/50';
                 if (data.activeMatch) {
-                    borderClass = 'border-amber-400 ring-4 ring-amber-500/50 shadow-[0_0_30px_rgba(245,158,11,0.5)] scale-[1.03]';
+                     borderClass = 'border-amber-400 ring-4 ring-amber-500/50 shadow-[0_0_30px_rgba(245,158,11,0.5)] scale-[1.03]';
                 } else if (data.highlighted) {
-                    borderClass = 'border-emerald-400 ring-2 ring-emerald-500/40 shadow-[0_0_25px_rgba(16,185,129,0.35)]';
+                     borderClass = 'border-emerald-400 ring-2 ring-emerald-500/40 shadow-[0_0_25px_rgba(16,185,129,0.35)]';
                 }
 
                 return React.createElement('div', {
-                    className: \`relative border \\\${borderClass} bg-slate-900/90 backdrop-blur-md rounded-xl p-4 w-80 text-white shadow-2xl flex flex-col gap-3 transition-all cursor-pointer\`,
+                    className: \`relative border \${borderClass} bg-slate-900/90 backdrop-blur-md rounded-xl p-4 w-80 text-white shadow-2xl flex flex-col gap-3 transition-all cursor-pointer\`,
                     onDoubleClick: () => {
                         if (vscode) vscode.postMessage({
                             command: 'openFile',
@@ -520,8 +565,9 @@ function getWebviewContent() {
                         React.createElement('span', { className: 'text-[9px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800 font-semibold uppercase tracking-wider' }, 'Component')
                     ),
                     React.createElement('div', {
-                        className: 'h-28 overflow-y-auto rounded bg-black/60 text-[10px] p-2 font-mono border border-slate-950 whitespace-pre scrollbar-thin scrollbar-thumb-slate-800'
-                    }, data.code),
+                        onClick: loadCode,
+                        className: 'h-28 overflow-y-auto rounded bg-black/60 text-[10px] p-2 font-mono border border-slate-950 whitespace-pre scrollbar-thin scrollbar-thumb-slate-800 cursor-pointer hover:bg-black/80 transition-colors'
+                    }, code),
                     React.createElement('div', { className: 'flex gap-2' },
                         React.createElement('input', {
                             type: 'text',
@@ -609,24 +655,44 @@ function getWebviewContent() {
                             const rawNodes = msg.nodes;
                             const rawEdges = msg.edges;
 
-                            // Compute levels (longest path for top-to-bottom layout)
+                            // Compute levels (longest path for top-to-bottom layout) in O(V + E)
                             const levels = {};
-                            rawNodes.forEach(n => { levels[n.id] = 0; });
+                            const visited = new Set();
+                            const visiting = new Set();
 
-                            for (let i = 0; i < rawNodes.length; i++) {
-                                let changed = false;
-                                rawEdges.forEach(edge => {
-                                    const src = edge.source;
-                                    const tgt = edge.target;
-                                    if (levels[src] !== undefined && levels[tgt] !== undefined) {
-                                        if (levels[tgt] <= levels[src]) {
-                                            levels[tgt] = levels[src] + 1;
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                                if (!changed) break;
+                            const inEdges = {};
+                            rawNodes.forEach(n => {
+                                inEdges[n.id] = [];
+                                levels[n.id] = 0;
+                            });
+                            rawEdges.forEach(edge => {
+                                if (inEdges[edge.target]) {
+                                    inEdges[edge.target].push(edge.source);
+                                }
+                            });
+
+                            function computeLevel(nodeId) {
+                                if (visited.has(nodeId)) {
+                                    return levels[nodeId];
+                                }
+                                if (visiting.has(nodeId)) {
+                                    return 0; // cycle
+                                }
+                                visiting.add(nodeId);
+                                let maxParentLevel = -1;
+                                const parents = inEdges[nodeId] || [];
+                                for (const parent of parents) {
+                                    maxParentLevel = Math.max(maxParentLevel, computeLevel(parent));
+                                }
+                                visiting.delete(nodeId);
+                                visited.add(nodeId);
+                                levels[nodeId] = maxParentLevel + 1;
+                                return levels[nodeId];
                             }
+
+                            rawNodes.forEach(n => {
+                                computeLevel(n.id);
+                            });
 
                             // Group nodes by level
                             const nodesByLevel = {};
@@ -660,7 +726,23 @@ function getWebviewContent() {
                                 });
                             });
 
-                            setNodes(flowNodes);
+                            setNodes(prevNodes => {
+                                const codeMap = new Map();
+                                prevNodes.forEach(pn => {
+                                    if (pn.data && pn.data.code) {
+                                        codeMap.set(pn.data.filePath, pn.data.code);
+                                    }
+                                });
+
+                                return flowNodes.map(fn => {
+                                    const cachedCode = codeMap.get(fn.data.filePath);
+                                    if (cachedCode) {
+                                        fn.data.code = cachedCode;
+                                    }
+                                    return fn;
+                                });
+                            });
+
                             setEdges(rawEdges.map(e => ({
                                 id: e.id,
                                 source: e.source,
@@ -670,6 +752,19 @@ function getWebviewContent() {
                             setScanStats(prev => ({
                                 ...prev,
                                 status: 'complete'
+                            }));
+                        } else if (msg.command === 'fileCodeResponse') {
+                            setNodes(prevNodes => prevNodes.map(n => {
+                                if (n.data.filePath === msg.filePath) {
+                                    return {
+                                        ...n,
+                                        data: {
+                                            ...n.data,
+                                            code: msg.code
+                                        }
+                                    };
+                                }
+                                return n;
                             }));
                         } else if (msg.command === 'errorNotify') {
                             alert('AI Error: ' + msg.msg);

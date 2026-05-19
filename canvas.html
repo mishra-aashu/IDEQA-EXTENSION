@@ -47,6 +47,30 @@
             function ComponentNode({ data }) {
                 const [prompt, setPrompt] = useState('');
                 const { getNode, setCenter } = useReactFlow();
+                const [code, setCode] = useState(data.code || 'Click to load preview...');
+                const [loading, setLoading] = useState(false);
+
+                useEffect(() => {
+                    if (data.code) {
+                        setCode(data.code);
+                        setLoading(false);
+                    } else {
+                        setCode('Click to load preview...');
+                    }
+                }, [data.code]);
+
+                const loadCode = (e) => {
+                    e.stopPropagation();
+                    if (loading || (data.code && data.code !== 'Click to load preview...')) return;
+                    setLoading(true);
+                    setCode('Loading...');
+                    if (vscode) {
+                        vscode.postMessage({
+                            command: 'getFileCode',
+                            filePath: data.filePath
+                        });
+                    }
+                };
 
                 const focusNode = (id) => {
                     const node = getNode(id);
@@ -60,7 +84,7 @@
                     if (vscode) vscode.postMessage({
                         command: 'requestAIEdit',
                         nodeId: data.label,
-                        currentCode: data.code,
+                        currentCode: code,
                         filePath: data.filePath,
                         prompt: prompt
                     });
@@ -117,8 +141,9 @@
                         React.createElement('span', { className: 'text-[9px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800 font-semibold uppercase tracking-wider' }, 'Component')
                     ),
                     React.createElement('div', {
-                        className: 'h-28 overflow-y-auto rounded bg-black/60 text-[10px] p-2 font-mono border border-slate-950 whitespace-pre scrollbar-thin scrollbar-thumb-slate-800'
-                    }, data.code),
+                        onClick: loadCode,
+                        className: 'h-28 overflow-y-auto rounded bg-black/60 text-[10px] p-2 font-mono border border-slate-950 whitespace-pre scrollbar-thin scrollbar-thumb-slate-800 cursor-pointer hover:bg-black/80 transition-colors'
+                    }, code),
                     React.createElement('div', { className: 'flex gap-2' },
                         React.createElement('input', {
                             type: 'text',
@@ -206,24 +231,44 @@
                             const rawNodes = msg.nodes;
                             const rawEdges = msg.edges;
 
-                            // Compute levels (longest path for top-to-bottom layout)
+                            // Compute levels (longest path for top-to-bottom layout) in O(V + E)
                             const levels = {};
-                            rawNodes.forEach(n => { levels[n.id] = 0; });
+                            const visited = new Set();
+                            const visiting = new Set();
 
-                            for (let i = 0; i < rawNodes.length; i++) {
-                                let changed = false;
-                                rawEdges.forEach(edge => {
-                                    const src = edge.source;
-                                    const tgt = edge.target;
-                                    if (levels[src] !== undefined && levels[tgt] !== undefined) {
-                                        if (levels[tgt] <= levels[src]) {
-                                            levels[tgt] = levels[src] + 1;
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                                if (!changed) break;
+                            const inEdges = {};
+                            rawNodes.forEach(n => {
+                                inEdges[n.id] = [];
+                                levels[n.id] = 0;
+                            });
+                            rawEdges.forEach(edge => {
+                                if (inEdges[edge.target]) {
+                                    inEdges[edge.target].push(edge.source);
+                                }
+                            });
+
+                            function computeLevel(nodeId) {
+                                if (visited.has(nodeId)) {
+                                    return levels[nodeId];
+                                }
+                                if (visiting.has(nodeId)) {
+                                    return 0; // cycle
+                                }
+                                visiting.add(nodeId);
+                                let maxParentLevel = -1;
+                                const parents = inEdges[nodeId] || [];
+                                for (const parent of parents) {
+                                    maxParentLevel = Math.max(maxParentLevel, computeLevel(parent));
+                                }
+                                visiting.delete(nodeId);
+                                visited.add(nodeId);
+                                levels[nodeId] = maxParentLevel + 1;
+                                return levels[nodeId];
                             }
+
+                            rawNodes.forEach(n => {
+                                computeLevel(n.id);
+                            });
 
                             // Group nodes by level
                             const nodesByLevel = {};
@@ -257,7 +302,23 @@
                                 });
                             });
 
-                            setNodes(flowNodes);
+                            setNodes(prevNodes => {
+                                const codeMap = new Map();
+                                prevNodes.forEach(pn => {
+                                    if (pn.data && pn.data.code) {
+                                        codeMap.set(pn.data.filePath, pn.data.code);
+                                    }
+                                });
+
+                                return flowNodes.map(fn => {
+                                    const cachedCode = codeMap.get(fn.data.filePath);
+                                    if (cachedCode) {
+                                        fn.data.code = cachedCode;
+                                    }
+                                    return fn;
+                                });
+                            });
+
                             setEdges(rawEdges.map(e => ({
                                 id: e.id,
                                 source: e.source,
@@ -267,6 +328,19 @@
                             setScanStats(prev => ({
                                 ...prev,
                                 status: 'complete'
+                            }));
+                        } else if (msg.command === 'fileCodeResponse') {
+                            setNodes(prevNodes => prevNodes.map(n => {
+                                if (n.data.filePath === msg.filePath) {
+                                    return {
+                                        ...n,
+                                        data: {
+                                            ...n.data,
+                                            code: msg.code
+                                        }
+                                    };
+                                }
+                                return n;
                             }));
                         } else if (msg.command === 'errorNotify') {
                             alert('AI Error: ' + msg.msg);
