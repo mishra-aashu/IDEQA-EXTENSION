@@ -1,0 +1,16 @@
+{
+  "name": "antigravity-component-canvas",
+  "displayName": "Antigravity Component Canvas",
+  "description": "Visual component architecture editor for Antigravity",
+  "version": "1.0.0",
+  "publisher": "antigravity",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./extension.js",
+  "contributes": {},
+  "dependencies": {}
+}
