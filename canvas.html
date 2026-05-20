@@ -8,6 +8,7 @@
     <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/reactflow@11.10.1/dist/umd/index.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reactflow@11.10.1/dist/style.css">
     <style>
@@ -42,13 +43,24 @@
 
         waitForReactFlow(function() {
             const { useState, useEffect, useCallback, useRef, useMemo } = React;
-            const { ReactFlow, Background, Controls, MiniMap, Handle, ReactFlowProvider, useReactFlow } = window.ReactFlow;
+            const { ReactFlow, Background, Controls, MiniMap, Handle, ReactFlowProvider, useReactFlow, useViewport } = window.ReactFlow;
 
-            function ComponentNode({ data }) {
+            const ComponentNode = React.memo(function ComponentNode({ data }) {
                 const [prompt, setPrompt] = useState('');
                 const { getNode, setCenter } = useReactFlow();
+                const { zoom } = useViewport();
                 const [code, setCode] = useState(data.code || 'Click to load preview...');
                 const [loading, setLoading] = useState(false);
+                const [expanded, setExpanded] = useState(false);
+
+                const isZoomedOut = zoom < 0.55;
+
+                // Auto-expand if the node is highlighted or is the active match from search
+                useEffect(() => {
+                    if (data.activeMatch || data.highlighted) {
+                        setExpanded(true);
+                    }
+                }, [data.activeMatch, data.highlighted]);
 
                 useEffect(() => {
                     if (data.code) {
@@ -116,12 +128,131 @@
                     e.dataTransfer.effectAllowed = 'copy';
                 };
 
+                const toggleExpand = (e) => {
+                    e.stopPropagation();
+                    setExpanded(!expanded);
+                };
+
                 let borderClass = 'border-slate-800 hover:border-emerald-500/50';
                 if (data.activeMatch) {
                     borderClass = 'border-amber-400 ring-4 ring-amber-500/50 shadow-[0_0_30px_rgba(245,158,11,0.5)] scale-[1.03]';
                 } else if (data.highlighted) {
                     borderClass = 'border-emerald-400 ring-2 ring-emerald-500/40 shadow-[0_0_25px_rgba(16,185,129,0.35)]';
                 }
+
+                if (isZoomedOut) {
+                    return React.createElement('div', {
+                        className: `relative border ${borderClass} bg-slate-900 rounded-lg p-3 w-80 h-20 text-white shadow-md flex flex-col justify-center transition-all`,
+                        onDoubleClick: () => {
+                            if (vscode) vscode.postMessage({ command: 'openFile', filePath: data.filePath });
+                        }
+                    },
+                        React.createElement(Handle, { type: 'target', position: 'top' }),
+                        React.createElement('div', { className: 'font-mono font-bold text-emerald-400 text-sm truncate' }, data.label),
+                        React.createElement('div', { className: 'text-[10px] text-slate-500 mt-1' }, 'Double-click to open'),
+                        React.createElement(Handle, { type: 'source', position: 'bottom' })
+                    );
+                }
+
+                const headerElements = [
+                    React.createElement('span', { className: 'font-mono font-bold text-emerald-400 text-sm truncate max-w-[150px]' }, data.label),
+                    React.createElement('div', { className: 'flex items-center gap-1.5' },
+                        React.createElement('span', { className: 'text-[9px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800 font-semibold uppercase tracking-wider' }, 'Component'),
+                        React.createElement('button', {
+                            onClick: toggleExpand,
+                            className: 'text-[10px] text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 rounded transition-colors border border-slate-700 font-sans'
+                        }, expanded ? 'Collapse ➖' : 'Expand ➕')
+                    )
+                ];
+
+                const children = [
+                    React.createElement(Handle, {
+                        type: 'target',
+                        position: 'top'
+                    }),
+                    React.createElement('div', { className: 'flex justify-between items-center border-b border-slate-800 pb-2' }, ...headerElements)
+                ];
+
+                if (expanded) {
+                    children.push(
+                        React.createElement('div', {
+                            onClick: loadCode,
+                            className: 'h-28 overflow-y-auto rounded bg-black/60 text-[10px] p-2 font-mono border border-slate-950 whitespace-pre scrollbar-thin scrollbar-thumb-slate-800 cursor-pointer hover:bg-black/80 transition-colors'
+                        }, code),
+                        React.createElement('div', { className: 'flex gap-2' },
+                            React.createElement('input', {
+                                type: 'text',
+                                placeholder: 'Ask AI to modify...',
+                                value: prompt,
+                                onChange: e => setPrompt(e.target.value),
+                                onKeyDown: e => e.key === 'Enter' && handleAIEdit(),
+                                className: 'flex-1 bg-slate-950 text-xs text-slate-200 border border-slate-800 rounded-lg p-2 focus:outline-none focus:border-emerald-500 font-mono'
+                            }),
+                            React.createElement('button', {
+                                onClick: handleAIEdit,
+                                className: 'bg-emerald-500 hover:bg-emerald-400 text-xs text-black font-bold px-3 py-2 rounded-lg transition-colors'
+                            }, 'Ask')
+                        ),
+                        React.createElement('button', {
+                            onClick: handleCreateChild,
+                            className: 'bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 font-bold px-2 py-2 rounded-lg border border-slate-700 w-full transition-all'
+                        }, '+ Add Import Connection'),
+                        React.createElement('button', {
+                            draggable: true,
+                            onDragStart: handleDragStart,
+                            onClick: handleReferenceInChat,
+                            className: 'bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-bold px-2 py-2 rounded-lg border border-indigo-500 w-full transition-all mt-1 cursor-grab active:cursor-grabbing'
+                        }, '💬 Reference (Drag to Chat)'),
+                        data.imports && data.imports.length > 0 && React.createElement('div', { className: 'border-t border-slate-800 pt-2 flex flex-col gap-1' },
+                            React.createElement('span', { className: 'text-[9px] text-slate-400 font-bold uppercase tracking-wider' }, 'Imports:'),
+                            React.createElement('div', { className: 'flex flex-wrap gap-1' },
+                                data.imports.map(imp => React.createElement('button', {
+                                    key: imp,
+                                    onClick: (e) => {
+                                        e.stopPropagation();
+                                        focusNode(imp);
+                                    },
+                                    className: 'text-[9px] bg-slate-950 hover:bg-emerald-500 hover:text-black text-slate-300 border border-slate-800 px-2 py-0.5 rounded transition-all truncate max-w-[120px] font-mono'
+                                }, imp))
+                            )
+                        ),
+                        data.importedBy && data.importedBy.length > 0 && React.createElement('div', { className: 'border-t border-slate-800 pt-2 flex flex-col gap-1' },
+                            React.createElement('span', { className: 'text-[9px] text-slate-400 font-bold uppercase tracking-wider' }, 'Imported By:'),
+                            React.createElement('div', { className: 'flex flex-wrap gap-1' },
+                                data.importedBy.map(imp => React.createElement('button', {
+                                    key: imp,
+                                    onClick: (e) => {
+                                        e.stopPropagation();
+                                        focusNode(imp);
+                                    },
+                                    className: 'text-[9px] bg-slate-950 hover:bg-indigo-500 hover:text-white text-slate-300 border border-slate-800 px-2 py-0.5 rounded transition-all truncate max-w-[120px] font-mono'
+                                }, imp))
+                            )
+                        )
+                    );
+                } else {
+                    const importsCount = data.imports ? data.imports.length : 0;
+                    const importedByCount = data.importedBy ? data.importedBy.length : 0;
+                    if (importsCount > 0 || importedByCount > 0) {
+                        children.push(
+                            React.createElement('div', { className: 'flex justify-between text-[10px] text-slate-400 font-mono' },
+                                React.createElement('span', null, `Imports: ${importsCount}`),
+                                React.createElement('span', null, `Imported By: ${importedByCount}`)
+                            )
+                        );
+                    } else {
+                        children.push(
+                            React.createElement('div', { className: 'text-[10px] text-slate-500 font-mono italic text-center' }, 'No connections')
+                        );
+                    }
+                }
+
+                children.push(
+                    React.createElement(Handle, {
+                        type: 'source',
+                        position: 'bottom'
+                    })
+                );
 
                 return React.createElement('div', {
                     className: `relative border ${borderClass} bg-slate-900/90 backdrop-blur-md rounded-xl p-4 w-80 text-white shadow-2xl flex flex-col gap-3 transition-all cursor-pointer`,
@@ -131,75 +262,10 @@
                             filePath: data.filePath
                         });
                     }
-                },
-                    React.createElement(Handle, {
-                        type: 'target',
-                        position: 'top'
-                    }),
-                    React.createElement('div', { className: 'flex justify-between items-center border-b border-slate-800 pb-2' },
-                        React.createElement('span', { className: 'font-mono font-bold text-emerald-400 text-sm truncate max-w-[200px]' }, data.label),
-                        React.createElement('span', { className: 'text-[9px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800 font-semibold uppercase tracking-wider' }, 'Component')
-                    ),
-                    React.createElement('div', {
-                        onClick: loadCode,
-                        className: 'h-28 overflow-y-auto rounded bg-black/60 text-[10px] p-2 font-mono border border-slate-950 whitespace-pre scrollbar-thin scrollbar-thumb-slate-800 cursor-pointer hover:bg-black/80 transition-colors'
-                    }, code),
-                    React.createElement('div', { className: 'flex gap-2' },
-                        React.createElement('input', {
-                            type: 'text',
-                            placeholder: 'Ask AI to modify...',
-                            value: prompt,
-                            onChange: e => setPrompt(e.target.value),
-                            onKeyDown: e => e.key === 'Enter' && handleAIEdit(),
-                            className: 'flex-1 bg-slate-950 text-xs text-slate-200 border border-slate-800 rounded-lg p-2 focus:outline-none focus:border-emerald-500 font-mono'
-                        }),
-                        React.createElement('button', {
-                            onClick: handleAIEdit,
-                            className: 'bg-emerald-500 hover:bg-emerald-400 text-xs text-black font-bold px-3 py-2 rounded-lg transition-colors'
-                        }, 'Ask')
-                    ),
-                    React.createElement('button', {
-                        onClick: handleCreateChild,
-                        className: 'bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 font-bold px-2 py-2 rounded-lg border border-slate-700 w-full transition-all'
-                    }, '+ Add Import Connection'),
-                    React.createElement('button', {
-                        draggable: true,
-                        onDragStart: handleDragStart,
-                        onClick: handleReferenceInChat,
-                        className: 'bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-bold px-2 py-2 rounded-lg border border-indigo-500 w-full transition-all mt-1 cursor-grab active:cursor-grabbing'
-                    }, '💬 Reference (Drag to Chat)'),
-                    data.imports && data.imports.length > 0 && React.createElement('div', { className: 'border-t border-slate-800 pt-2 flex flex-col gap-1' },
-                        React.createElement('span', { className: 'text-[9px] text-slate-400 font-bold uppercase tracking-wider' }, 'Imports:'),
-                        React.createElement('div', { className: 'flex flex-wrap gap-1' },
-                            data.imports.map(imp => React.createElement('button', {
-                                key: imp,
-                                onClick: (e) => {
-                                    e.stopPropagation();
-                                    focusNode(imp);
-                                },
-                                className: 'text-[9px] bg-slate-950 hover:bg-emerald-500 hover:text-black text-slate-300 border border-slate-800 px-2 py-0.5 rounded transition-all truncate max-w-[120px] font-mono'
-                            }, imp))
-                        )
-                    ),
-                    data.importedBy && data.importedBy.length > 0 && React.createElement('div', { className: 'border-t border-slate-800 pt-2 flex flex-col gap-1' },
-                        React.createElement('span', { className: 'text-[9px] text-slate-400 font-bold uppercase tracking-wider' }, 'Imported By:'),
-                        React.createElement('div', { className: 'flex flex-wrap gap-1' },
-                            data.importedBy.map(imp => React.createElement('button', {
-                                key: imp,
-                                onClick: (e) => {
-                                    e.stopPropagation();
-                                    focusNode(imp);
-                                },
-                                className: 'text-[9px] bg-slate-950 hover:bg-indigo-500 hover:text-white text-slate-300 border border-slate-800 px-2 py-0.5 rounded transition-all truncate max-w-[120px] font-mono'
-                            }, imp))
-                        )
-                    ),
-                    React.createElement(Handle, {
-                        type: 'source',
-                        position: 'bottom'
-                    })
-                );
-            }
+                }, ...children);
+            });
+
+            const nodeTypes = { componentNode: ComponentNode };
 
             function CanvasApp() {
                 const [nodes, setNodes] = useState([]);
@@ -231,76 +297,114 @@
                             const rawNodes = msg.nodes;
                             const rawEdges = msg.edges;
 
-                            // Compute levels (longest path for top-to-bottom layout) in O(V + E)
-                            const levels = {};
-                            const visited = new Set();
-                            const visiting = new Set();
+                            // Helper DFS level assignment layout as fallback
+                            function computeDFSLayout(rNodes, rEdges) {
+                                const levels = {};
+                                const visited = new Set();
+                                const visiting = new Set();
 
-                            const inEdges = {};
-                            rawNodes.forEach(n => {
-                                inEdges[n.id] = [];
-                                levels[n.id] = 0;
-                            });
-                            rawEdges.forEach(edge => {
-                                if (inEdges[edge.target]) {
-                                    inEdges[edge.target].push(edge.source);
-                                }
-                            });
+                                const inEdges = {};
+                                rNodes.forEach(n => {
+                                    inEdges[n.id] = [];
+                                    levels[n.id] = 0;
+                                });
+                                rEdges.forEach(edge => {
+                                    if (inEdges[edge.target]) {
+                                        inEdges[edge.target].push(edge.source);
+                                    }
+                                });
 
-                            function computeLevel(nodeId) {
-                                if (visited.has(nodeId)) {
+                                function computeLevel(nodeId) {
+                                    if (visited.has(nodeId)) {
+                                        return levels[nodeId];
+                                    }
+                                    if (visiting.has(nodeId)) {
+                                        return 0; // cycle
+                                    }
+                                    visiting.add(nodeId);
+                                    let maxParentLevel = -1;
+                                    const parents = inEdges[nodeId] || [];
+                                    for (const parent of parents) {
+                                        maxParentLevel = Math.max(maxParentLevel, computeLevel(parent));
+                                    }
+                                    visiting.delete(nodeId);
+                                    visited.add(nodeId);
+                                    levels[nodeId] = maxParentLevel + 1;
                                     return levels[nodeId];
                                 }
-                                if (visiting.has(nodeId)) {
-                                    return 0; // cycle
-                                }
-                                visiting.add(nodeId);
-                                let maxParentLevel = -1;
-                                const parents = inEdges[nodeId] || [];
-                                for (const parent of parents) {
-                                    maxParentLevel = Math.max(maxParentLevel, computeLevel(parent));
-                                }
-                                visiting.delete(nodeId);
-                                visited.add(nodeId);
-                                levels[nodeId] = maxParentLevel + 1;
-                                return levels[nodeId];
-                            }
 
-                            rawNodes.forEach(n => {
-                                computeLevel(n.id);
-                            });
+                                rNodes.forEach(n => {
+                                    computeLevel(n.id);
+                                });
 
-                            // Group nodes by level
-                            const nodesByLevel = {};
-                            rawNodes.forEach(n => {
-                                const lvl = levels[n.id] || 0;
-                                if (!nodesByLevel[lvl]) nodesByLevel[lvl] = [];
-                                nodesByLevel[lvl].push(n);
-                            });
+                                const nodesByLevel = {};
+                                rNodes.forEach(n => {
+                                    const lvl = levels[n.id] || 0;
+                                    if (!nodesByLevel[lvl]) nodesByLevel[lvl] = [];
+                                    nodesByLevel[lvl].push(n);
+                                });
 
-                            // Calculate positions
-                            const flowNodes = [];
-                            const levelYGap = 350;
-                            const nodeXGap = 360;
+                                const result = [];
+                                const levelYGap = 350;
+                                const nodeXGap = 360;
 
-                            Object.keys(nodesByLevel).forEach(lvlStr => {
-                                const lvl = parseInt(lvlStr);
-                                const levelNodes = nodesByLevel[lvl];
-                                const totalWidth = (levelNodes.length - 1) * nodeXGap;
-                                const startX = -totalWidth / 2;
+                                Object.keys(nodesByLevel).forEach(lvlStr => {
+                                    const lvl = parseInt(lvlStr);
+                                    const levelNodes = nodesByLevel[lvl];
+                                    const totalWidth = (levelNodes.length - 1) * nodeXGap;
+                                    const startX = -totalWidth / 2;
 
-                                levelNodes.forEach((n, idx) => {
-                                    flowNodes.push({
-                                        id: n.id,
-                                        type: 'componentNode',
-                                        position: {
-                                            x: startX + idx * nodeXGap + 400,
-                                            y: 100 + lvl * levelYGap
-                                        },
-                                        data: { label: n.label, code: n.code, filePath: n.filePath, imports: n.imports || [], importedBy: n.importedBy || [] }
+                                    levelNodes.forEach((n, idx) => {
+                                        result.push({
+                                            id: n.id,
+                                            type: 'componentNode',
+                                            position: {
+                                                x: startX + idx * nodeXGap + 400,
+                                                y: 100 + lvl * levelYGap
+                                            },
+                                            data: { label: n.label, code: n.code, filePath: n.filePath, imports: n.imports || [], importedBy: n.importedBy || [] }
+                                        });
                                     });
                                 });
-                            });
+                                return result;
+                            }
+
+                            let flowNodes = [];
+                            const useDagre = typeof dagre !== 'undefined';
+                            if (useDagre) {
+                                try {
+                                    const g = new dagre.graphlib.Graph();
+                                    g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100, edgesep: 30 });
+                                    g.setDefaultEdgeLabel(() => ({}));
+
+                                    rawNodes.forEach(n => {
+                                        g.setNode(n.id, { width: 320, height: 90 });
+                                    });
+                                    rawEdges.forEach(e => {
+                                        g.setEdge(e.source, e.target);
+                                    });
+
+                                    dagre.layout(g);
+
+                                    flowNodes = rawNodes.map(n => {
+                                        const nodeWithPos = g.node(n.id);
+                                        return {
+                                            id: n.id,
+                                            type: 'componentNode',
+                                            position: {
+                                                x: nodeWithPos.x - 160,
+                                                y: nodeWithPos.y - 45
+                                            },
+                                            data: { label: n.label, code: n.code, filePath: n.filePath, imports: n.imports || [], importedBy: n.importedBy || [] }
+                                        };
+                                    });
+                                } catch (e) {
+                                    console.error('Dagre layout failed, falling back to DFS level assignment', e);
+                                    flowNodes = computeDFSLayout(rawNodes, rawEdges);
+                                }
+                            } else {
+                                flowNodes = computeDFSLayout(rawNodes, rawEdges);
+                            }
 
                             setNodes(prevNodes => {
                                 const codeMap = new Map();
@@ -323,7 +427,7 @@
                                 id: e.id,
                                 source: e.source,
                                 target: e.target,
-                                animated: true
+                                animated: false
                             })));
                             setScanStats(prev => ({
                                 ...prev,
@@ -452,11 +556,12 @@
                     React.createElement(ReactFlow, {
                         nodes: filteredNodes,
                         edges,
-                        nodeTypes: { componentNode: ComponentNode },
+                        nodeTypes: nodeTypes,
                         fitView: true,
                         fitViewOptions: { padding: 1.5, minZoom: 0.1, maxZoom: 0.5 },
                         panOnScroll: true,
-                        zoomOnPinch: true
+                        zoomOnPinch: true,
+                        onlyRenderVisibleElements: true
                     },
                         React.createElement(Background, { color: '#1e293b', gap: 16 }),
                         React.createElement(Controls, { className: 'bg-slate-900 border border-slate-800 text-white rounded shadow-lg' }),
